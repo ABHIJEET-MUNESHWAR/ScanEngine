@@ -132,31 +132,35 @@ where
             *entry
         };
 
-        let candidates = self.index.read().candidates(&instrument);
+        // Evaluate the candidate rules under the read lock in a scoped block so
+        // the guard is released before any `.await` (bus publish). No candidate
+        // set is cloned: rules are visited in place.
         let mut evaluations = 0u64;
-        let mut signals = Vec::new();
-
-        for rule in candidates {
-            evaluations += rule.conditions.len() as u64;
-            let key = (rule.id, instrument.clone());
-            if rule.matches(&state) {
-                // Rising edge: only emit when transitioning from not-firing.
-                if self.firing.insert(key, ()).is_none() {
-                    let signal = Signal {
-                        rule_id: rule.id,
-                        rule_name: rule.name.clone(),
-                        instrument: instrument.clone(),
-                        sequence: self.next_sequence(),
-                        last_price: state.last,
-                        pct_change_bps: state.pct_change_bps(),
-                        triggered_at: Utc::now(),
-                    };
-                    signals.push(signal);
+        let signals = {
+            let index = self.index.read();
+            let mut signals = Vec::new();
+            index.for_each_candidate(&instrument, |rule| {
+                evaluations += rule.conditions.len() as u64;
+                let key = (rule.id, instrument.clone());
+                if rule.matches(&state) {
+                    // Rising edge: only emit when transitioning from not-firing.
+                    if self.firing.insert(key, ()).is_none() {
+                        signals.push(Signal {
+                            rule_id: rule.id,
+                            rule_name: rule.name.clone(),
+                            instrument: instrument.clone(),
+                            sequence: self.next_sequence(),
+                            last_price: state.last,
+                            pct_change_bps: state.pct_change_bps(),
+                            triggered_at: Utc::now(),
+                        });
+                    }
+                } else {
+                    self.firing.remove(&key);
                 }
-            } else {
-                self.firing.remove(&key);
-            }
-        }
+            });
+            signals
+        };
 
         for signal in &signals {
             self.bus.publish(signal.clone()).await?;

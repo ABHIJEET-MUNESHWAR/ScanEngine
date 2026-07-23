@@ -51,6 +51,20 @@ impl RuleIndex {
         out
     }
 
+    /// Visit every candidate rule for `instrument` in place, without allocating
+    /// or cloning the candidate set. This is the hot evaluation path: a tick
+    /// only touches its instrument-scoped rules plus the `Any`-scoped rules.
+    pub fn for_each_candidate<F: FnMut(&Rule)>(&self, instrument: &InstrumentId, mut f: F) {
+        for rule in &self.any {
+            f(rule);
+        }
+        if let Some(v) = self.by_instrument.get(instrument) {
+            for rule in v {
+                f(rule);
+            }
+        }
+    }
+
     /// Total number of indexed rules.
     #[must_use]
     pub fn len(&self) -> usize {
