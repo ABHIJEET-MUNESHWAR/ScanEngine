@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -29,7 +30,7 @@ where
     bus: Arc<B>,
     index: RwLock<RuleIndex>,
     states: DashMap<InstrumentId, InstrumentState>,
-    firing: DashMap<(RuleId, InstrumentId), ()>,
+    firing: DashMap<InstrumentId, HashSet<RuleId>>,
     limiter: RateLimiter,
     sequence: AtomicU64,
     stats: Mutex<ScanStats>,
@@ -139,12 +140,16 @@ where
         let signals = {
             let index = self.index.read();
             let mut signals = Vec::new();
+            // One firing-set lookup per tick, keyed by instrument. Rule ids are
+            // `Copy`, so per-candidate membership updates allocate nothing — the
+            // previous design cloned the instrument id into a composite key for
+            // every candidate rule (up to thousands of allocations per tick).
+            let mut firing = self.firing.entry(instrument.clone()).or_default();
             index.for_each_candidate(&instrument, |rule| {
                 evaluations += rule.conditions.len() as u64;
-                let key = (rule.id, instrument.clone());
                 if rule.matches(&state) {
                     // Rising edge: only emit when transitioning from not-firing.
-                    if self.firing.insert(key, ()).is_none() {
+                    if firing.insert(rule.id) {
                         signals.push(Signal {
                             rule_id: rule.id,
                             rule_name: rule.name.clone(),
@@ -156,7 +161,7 @@ where
                         });
                     }
                 } else {
-                    self.firing.remove(&key);
+                    firing.remove(&rule.id);
                 }
             });
             signals
